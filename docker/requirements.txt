@@ -5,7 +5,7 @@
 # reference to torch.float8_e8m0fnu, which only exists in torch>=2.7, while the
 # DLC base ships torch 2.6. 5.9.0 is the resolved known-good version. Relax once
 # transformers >= 5.10.3 ships with the upstream compatibility fix.
-transformers==5.9.0
+transformers==5.10.1
 
 # Kokoro TTS + its G2P stack
 kokoro==0.9.4
