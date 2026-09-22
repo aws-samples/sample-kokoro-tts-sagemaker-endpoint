@@ -1,0 +1,30 @@
+[project]
+name = "sample-kokoro-tts-sagemaker-endpoint"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = [
+    "boto3>=1.43.31",
+    "numpy>=2.4.6",
+    "pytest>=9.0.3",
+    "pytest-dotenv>=0.5.2",
+    "ruff>=0.15.16",
+    "soundfile>=0.14.0",
+]
+once = []
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"
+
+[[tool.pyright.executionEnvironments]]
+root = "src"
+reportMissingImports = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+norecursedirs = ["tests/integration"]
+pythonpath = ["."]
+env_files = ["docker/voices.env"]

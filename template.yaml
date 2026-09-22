@@ -1,0 +1,309 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Kokoro TTS async inference endpoint. Creates an S3 bucket for async I/O,
+  a least-privilege execution role, the Amazon SageMaker AI Model/EndpointConfig/Endpoint,
+  and AWS Application Auto Scaling configured to scale to zero on idle.
+
+Parameters:
+  ImageRepo:
+    Type: String
+    Default: oss-tts/kokoro-inference
+    Description: Amazon ECR repository name (relative to the deploying account/region)
+
+  ImageTag:
+    Type: String
+    Default: latest
+    Description: Amazon ECR image tag
+
+  InstanceType:
+    Type: String
+    Default: ml.g4dn.xlarge
+    Description: Endpoint instance type
+
+  MaxConcurrentInvocationsPerInstance:
+    Type: Number
+    Default: 4
+    Description: Async inference per-instance concurrency cap
+
+  MaxAutoscaleCapacity:
+    Type: Number
+    Default: 2
+    Description: Maximum number of instances when backlog grows
+
+  BacklogTargetPerInstance:
+    Type: Number
+    Default: 5
+    Description: Target backlog size per instance for scale-out
+
+Resources:
+
+  LogsBucket:
+    Type: AWS::S3::Bucket
+    Metadata:
+      guard:
+        SuppressedRules:
+          - S3_BUCKET_LOGGING_ENABLED
+      checkov:
+        skip:
+          - id: CKV_AWS_18
+            comment: This is the logging destination bucket; logging it would create infinite recursion
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAccessLogs
+            Status: Enabled
+            ExpirationInDays: 30
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: RemoveExpiredAccessLogDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  LogsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref LogsBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowS3ServerAccessLogDelivery
+            Effect: Allow
+            Principal:
+              Service: logging.s3.amazonaws.com
+            Action: s3:PutObject
+            Resource: !Sub "${LogsBucket.Arn}/access-logs/*"
+            Condition:
+              ArnLike:
+                aws:SourceArn: !Sub "arn:${AWS::Partition}:s3:::*"
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+
+  AsyncBucket:
+    Type: AWS::S3::Bucket
+    DependsOn: LogsBucketPolicy
+    DeletionPolicy: Delete
+    UpdateReplacePolicy: Delete
+    Properties:
+      LoggingConfiguration:
+        DestinationBucketName: !Ref LogsBucket
+        LogFilePrefix: access-logs/
+      LifecycleConfiguration:
+        Rules:
+          - Id: ExpireAsyncArtifacts
+            Status: Enabled
+            ExpirationInDays: 7
+            NoncurrentVersionExpiration:
+              NoncurrentDays: 1
+          - Id: RemoveExpiredAsyncArtifactDeleteMarkers
+            Status: Enabled
+            ExpiredObjectDeleteMarker: true
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: sagemaker.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: S3AsyncIO
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:GetObject
+                  - s3:PutObject
+                  - s3:DeleteObject
+                Resource: !Sub "${AsyncBucket.Arn}/*"
+              - Effect: Allow
+                Action:
+                  - s3:ListBucket
+                Resource: !GetAtt AsyncBucket.Arn
+        - PolicyName: ECRPull
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              # ecr:GetAuthorizationToken does not support resource-level permissions
+              - Effect: Allow
+                Action:
+                  - ecr:GetAuthorizationToken
+                Resource: "*"
+              - Effect: Allow
+                Action:
+                  - ecr:BatchGetImage
+                  - ecr:GetDownloadUrlForLayer
+                  - ecr:BatchCheckLayerAvailability
+                Resource:
+                  - !Sub "arn:aws:ecr:${AWS::Region}:${AWS::AccountId}:repository/${ImageRepo}"
+                  - !Sub "arn:aws:ecr:${AWS::Region}:763104351884:repository/pytorch-inference"
+        - PolicyName: CloudWatchLogs
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                  - logs:DescribeLogStreams
+                Resource: !Sub "arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/sagemaker/Endpoints/*"
+
+  Model:
+    Type: AWS::SageMaker::Model
+    Properties:
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      PrimaryContainer:
+        Image: !Sub "${AWS::AccountId}.dkr.ecr.${AWS::Region}.amazonaws.com/${ImageRepo}:${ImageTag}"
+        Mode: SingleModel
+        # Handler resolution (SAGEMAKER_PROGRAM + PYTHONPATH=/opt/ml/code) is baked
+        # into the image ENV. Re-stated here for visibility; the image is the
+        # source of truth.
+        Environment:
+          SAGEMAKER_PROGRAM: inference.py
+          PYTHONPATH: /opt/ml/code
+
+  EndpointConfig:
+    Type: AWS::SageMaker::EndpointConfig
+    Properties:
+      ProductionVariants:
+        - VariantName: AllTraffic
+          ModelName: !GetAtt Model.ModelName
+          InstanceType: !Ref InstanceType
+          InitialInstanceCount: 1
+          InitialVariantWeight: 1
+      AsyncInferenceConfig:
+        OutputConfig:
+          S3OutputPath: !Sub "s3://${AsyncBucket}/async-out/"
+          S3FailurePath: !Sub "s3://${AsyncBucket}/async-fail/"
+        ClientConfig:
+          MaxConcurrentInvocationsPerInstance: !Ref MaxConcurrentInvocationsPerInstance
+
+  Endpoint:
+    Type: AWS::SageMaker::Endpoint
+    Properties:
+      EndpointConfigName: !GetAtt EndpointConfig.EndpointConfigName
+
+  ScalableTarget:
+    Type: AWS::ApplicationAutoScaling::ScalableTarget
+    DependsOn: Endpoint
+    Properties:
+      ServiceNamespace: sagemaker
+      ResourceId: !Sub "endpoint/${Endpoint.EndpointName}/variant/AllTraffic"
+      ScalableDimension: sagemaker:variant:DesiredInstanceCount
+      MinCapacity: 0
+      MaxCapacity: !Ref MaxAutoscaleCapacity
+      RoleARN: !Sub "arn:aws:iam::${AWS::AccountId}:role/aws-service-role/sagemaker.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_SageMakerEndpoint"
+
+  # Steady-state scaling once at least one instance is running: keeps the
+  # per-instance backlog near the target by adding/removing instances (1->N->1).
+  ScalingPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-backlog"
+      PolicyType: TargetTrackingScaling
+      ScalingTargetId: !Ref ScalableTarget
+      TargetTrackingScalingPolicyConfiguration:
+        TargetValue: !Ref BacklogTargetPerInstance
+        ScaleInCooldown: 600
+        ScaleOutCooldown: 60
+        CustomizedMetricSpecification:
+          MetricName: ApproximateBacklogSizePerInstance
+          Namespace: AWS/SageMaker
+          Statistic: Average
+          Dimensions:
+            - Name: EndpointName
+              Value: !GetAtt Endpoint.EndpointName
+
+  # Scale-from-zero: target tracking is blind at 0 instances (per-instance
+  # backlog divides by zero), so a separate step-scaling policy on
+  # HasBacklogWithoutCapacity does the 0->1 jump when a request queues with no
+  # capacity. Once an instance is up, the target-tracking policy above takes over.
+  ScaleFromZeroPolicy:
+    Type: AWS::ApplicationAutoScaling::ScalingPolicy
+    Properties:
+      PolicyName: !Sub "${AWS::StackName}-scale-from-zero"
+      PolicyType: StepScaling
+      ScalingTargetId: !Ref ScalableTarget
+      StepScalingPolicyConfiguration:
+        AdjustmentType: ExactCapacity
+        Cooldown: 300
+        MetricAggregationType: Maximum
+        StepAdjustments:
+          - MetricIntervalLowerBound: 0
+            ScalingAdjustment: 1
+
+  ScaleFromZeroAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${AWS::StackName}-has-backlog-without-capacity"
+      AlarmDescription: Queued requests exist with no instances; trigger scale-from-zero.
+      Namespace: AWS/SageMaker
+      MetricName: HasBacklogWithoutCapacity
+      Dimensions:
+        - Name: EndpointName
+          Value: !GetAtt Endpoint.EndpointName
+      Statistic: Maximum
+      Period: 60
+      EvaluationPeriods: 1
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      TreatMissingData: missing
+      AlarmActions:
+        - !Ref ScaleFromZeroPolicy
+
+Outputs:
+  EndpointName:
+    Description: SageMaker async endpoint name
+    Value: !GetAtt Endpoint.EndpointName
+
+  BucketName:
+    Description: S3 bucket for async I/O
+    Value: !Ref AsyncBucket
+
+  LogsBucketName:
+    Description: S3 bucket for access logs
+    Value: !Ref LogsBucket
+
+  InputPrefix:
+    Description: S3 URI prefix for input payloads
+    Value: !Sub "s3://${AsyncBucket}/async-in/"
+
+  OutputPrefix:
+    Description: S3 URI prefix where successful outputs land
+    Value: !Sub "s3://${AsyncBucket}/async-out/"
+
+  FailurePrefix:
+    Description: S3 URI prefix where failure metadata lands
+    Value: !Sub "s3://${AsyncBucket}/async-fail/"
+
+  RoleArn:
+    Description: SageMaker execution role ARN
+    Value: !GetAtt ExecutionRole.Arn

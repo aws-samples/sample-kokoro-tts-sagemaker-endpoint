@@ -1,0 +1,24 @@
+# Runtime deps layered on top of the PyTorch inference DLC, pinned to the exact
+# versions resolved in a known-good build (captured via `pip freeze`).
+#
+# transformers is held below 5.10.1: that release added an unconditional
+# reference to torch.float8_e8m0fnu, which only exists in torch>=2.7, while the
+# DLC base ships torch 2.6. 5.9.0 is the resolved known-good version. Relax once
+# transformers >= 5.10.3 ships with the upstream compatibility fix.
+transformers==5.9.0
+
+# Kokoro TTS + its G2P stack
+kokoro==0.9.4
+misaki==0.9.4
+phonemizer-fork==3.3.2
+espeakng-loader==0.2.4
+num2words==0.5.14
+
+# spaCy (misaki trf=True backend). The trf model is pinned via its release wheel
+# rather than `spacy download`, which would float to the latest compatible model.
+spacy==3.8.14
+spacy-curated-transformers==0.3.1
+en_core_web_trf @ https://github.com/explosion/spacy-models/releases/download/en_core_web_trf-3.8.0/en_core_web_trf-3.8.0-py3-none-any.whl
+
+# Audio I/O
+soundfile==0.13.1
