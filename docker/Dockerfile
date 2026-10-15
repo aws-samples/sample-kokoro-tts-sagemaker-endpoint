@@ -9,7 +9,8 @@
 # Runtime is fully offline: HF_HUB_OFFLINE=1 makes any accidental download fail
 # loudly rather than silently re-fetching at request time.
 
-FROM 763104351884.dkr.ecr.eu-west-2.amazonaws.com/pytorch-inference:2.6.0-gpu-py312-cu124-ubuntu22.04-sagemaker
+ARG AWS_REGION=eu-west-2
+FROM 763104351884.dkr.ecr.${AWS_REGION}.amazonaws.com/pytorch-inference:2.6.0-gpu-py312-cu124-ubuntu22.04-sagemaker
 
 ENV HF_HOME=/opt/ml/hf-cache
 

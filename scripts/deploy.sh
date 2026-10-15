@@ -11,7 +11,7 @@
 
 set -euo pipefail
 
-REGION="eu-west-2"
+REGION="${AWS_REGION:-eu-west-2}"
 STACK_NAME="${STACK_NAME:-kokoro-async}"
 TAG="${TAG:-latest}"
 

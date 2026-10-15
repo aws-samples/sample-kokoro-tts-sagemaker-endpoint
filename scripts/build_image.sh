@@ -13,11 +13,11 @@
 
 set -euo pipefail
 
-REGION="eu-west-2"
+REGION="${AWS_REGION:-eu-west-2}"
 REPO="oss-tts/kokoro-inference"
 TAG="${TAG:-latest}"
 
-ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
+ACCOUNT_ID="$(aws sts get-caller-identity --region "${REGION}" --query Account --output text)"
 
 REGISTRY="${ACCOUNT_ID}.dkr.ecr.${REGION}.amazonaws.com"
 IMAGE_URI="${REGISTRY}/${REPO}:${TAG}"
@@ -57,6 +57,7 @@ docker buildx build \
     --platform linux/amd64 \
     --provenance=false \
     --file docker/Dockerfile \
+    --build-arg "AWS_REGION=${REGION}" \
     --build-arg "KOKORO_VOICES=${KOKORO_VOICES}" \
     --tag "${IMAGE_URI}" \
     --push \

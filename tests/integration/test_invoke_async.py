@@ -5,9 +5,9 @@ Run manually after deployment:
 
     uv run pytest tests/integration/ -v
 
-To target a different stack name, set the STACK_NAME environment variable:
+To target a different Region or stack, set AWS_REGION or STACK_NAME:
 
-    STACK_NAME=my-stack uv run pytest tests/integration/ -v
+    AWS_REGION=us-east-1 STACK_NAME=my-stack uv run pytest tests/integration/ -v
 """
 
 import io
@@ -22,7 +22,7 @@ from botocore.exceptions import ClientError
 
 import os
 
-REGION = "eu-west-2"
+REGION = os.environ.get("AWS_REGION") or "eu-west-2"
 STACK_NAME = os.environ.get("STACK_NAME", "kokoro-async")
 SAMPLE_RATE = 24_000
 

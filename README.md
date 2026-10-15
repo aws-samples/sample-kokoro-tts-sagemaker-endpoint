@@ -53,6 +53,16 @@ The AWS CloudFormation stack (`template.yaml`) provisions:
 
 ### 1. Build and push the container image
 
+Set the Region for building, deployment, testing, and cleanup:
+
+```bash
+export AWS_REGION=eu-west-2
+```
+
+The scripts and integration test read `AWS_REGION`, defaulting to `eu-west-2`.
+The build script also passes it to the Dockerfile to select the regional base image.
+For another Region, check base-image availability, instance availability, and hosting quota before building.
+
 ```bash
 ./scripts/build_image.sh
 # Override the tag: TAG=2026-06-17 ./scripts/build_image.sh
@@ -147,7 +157,7 @@ uv run pytest tests/integration/ -v
 This empties both S3 buckets (async I/O and access logs) and deletes the CloudFormation stack (endpoint, model, IAM role, and both buckets). The Amazon ECR repository is created outside the stack and must be deleted separately if no longer needed:
 
 ```bash
-aws ecr delete-repository --repository-name oss-tts/kokoro-inference --region eu-west-2 --force
+aws ecr delete-repository --repository-name oss-tts/kokoro-inference --region "${AWS_REGION:-eu-west-2}" --force
 ```
 
 ## Conclusion
